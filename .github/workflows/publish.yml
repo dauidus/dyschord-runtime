@@ -91,6 +91,7 @@ jobs:
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
         run: |
           set -euo pipefail
           export DOCKER_CONFIG
@@ -112,7 +113,6 @@ jobs:
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
-          PREVIOUS_TAG: ${{ inputs.previous_tag }}
         run: |
           set -euo pipefail
           for image in backend-suite web gifbox clamav january-embed-shim; do
