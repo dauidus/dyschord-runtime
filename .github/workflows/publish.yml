@@ -23,6 +23,7 @@ concurrency:
 env:
   SOURCE_NAMESPACE: dyschord-runtime-staging
   DESTINATION_NAMESPACE: ghcr.io/dauidus/dyschord-runtime
+  LEGACY_PREVIOUS_NAMESPACE: registry.dyschord.com
 
 jobs:
   publish:
@@ -47,32 +48,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish staged architecture images and manifests
+      - name: Migrate the prior rollback manifests when absent
         shell: bash
         env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
           PREVIOUS_TAG: ${{ inputs.previous_tag }}
         run: |
           set -euo pipefail
           for image in backend-suite web gifbox clamav january-embed-shim; do
-            for tag in "${PREVIOUS_TAG}" "${IMAGE_TAG}"; do
-              destination="${DESTINATION_NAMESPACE}/${image}:${tag}"
-              architecture_refs=()
-              for arch in amd64 arm64; do
-                source="${SOURCE_NAMESPACE}/${image}:${tag}-${arch}"
-                architecture_ref="${destination}-${arch}"
-                actual="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")"
-                [[ "${actual}" == "linux/${arch}" ]]
-                docker tag "${source}" "${architecture_ref}"
-                docker push "${architecture_ref}"
-                architecture_refs+=("${architecture_ref}")
-              done
-              docker manifest rm "${destination}" >/dev/null 2>&1 || true
-              docker manifest create "${destination}" "${architecture_refs[@]}"
-              docker manifest annotate "${destination}" "${architecture_refs[0]}" --os linux --arch amd64
-              docker manifest annotate "${destination}" "${architecture_refs[1]}" --os linux --arch arm64
-              docker manifest push --purge "${destination}"
+            destination="${DESTINATION_NAMESPACE}/${image}:${PREVIOUS_TAG}"
+            if docker buildx imagetools inspect "${destination}" >/dev/null 2>&1; then
+              printf 'already published %s\n' "${destination}"
+              continue
+            fi
+            source="${LEGACY_PREVIOUS_NAMESPACE}/${image}:${PREVIOUS_TAG}"
+            raw="$(docker buildx imagetools inspect --raw "${source}")"
+            platforms="$(jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' <<<"${raw}")"
+            grep -qx 'linux/amd64' <<<"${platforms}"
+            grep -qx 'linux/arm64' <<<"${platforms}"
+            docker buildx imagetools create --tag "${destination}" "${source}"
+          done
+
+      - name: Publish staged architecture images and manifests
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          for image in backend-suite web gifbox clamav january-embed-shim; do
+            destination="${DESTINATION_NAMESPACE}/${image}:${IMAGE_TAG}"
+            architecture_refs=()
+            for arch in amd64 arm64; do
+              source="${SOURCE_NAMESPACE}/${image}:${IMAGE_TAG}-${arch}"
+              architecture_ref="${destination}-${arch}"
+              actual="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")"
+              [[ "${actual}" == "linux/${arch}" ]]
+              docker tag "${source}" "${architecture_ref}"
+              docker push "${architecture_ref}"
+              architecture_refs+=("${architecture_ref}")
             done
+            docker manifest rm "${destination}" >/dev/null 2>&1 || true
+            docker manifest create "${destination}" "${architecture_refs[@]}"
+            docker manifest annotate "${destination}" "${architecture_refs[0]}" --os linux --arch amd64
+            docker manifest annotate "${destination}" "${architecture_refs[1]}" --os linux --arch arm64
+            docker manifest push --purge "${destination}"
           done
 
       - name: Verify anonymous multi-architecture pulls
@@ -105,12 +123,10 @@ jobs:
         run: |
           set -euo pipefail
           for image in backend-suite web gifbox clamav january-embed-shim; do
-            for tag in "${PREVIOUS_TAG}" "${IMAGE_TAG}"; do
-              for arch in amd64 arm64; do
-                docker image rm \
-                  "${SOURCE_NAMESPACE}/${image}:${tag}-${arch}" \
-                  "${DESTINATION_NAMESPACE}/${image}:${tag}-${arch}" \
-                  >/dev/null 2>&1 || true
-              done
+            for arch in amd64 arm64; do
+              docker image rm \
+                "${SOURCE_NAMESPACE}/${image}:${IMAGE_TAG}-${arch}" \
+                "${DESTINATION_NAMESPACE}/${image}:${IMAGE_TAG}-${arch}" \
+                >/dev/null 2>&1 || true
             done
           done
