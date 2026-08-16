@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_NAMESPACE: dyschord-runtime-staging
+  HANDOFF_ROOT: /srv/dyschord/runtime-image-handoff
   DESTINATION_NAMESPACE: ghcr.io/dauidus/dyschord-runtime
   LEGACY_PREVIOUS_NAMESPACE: host.lima.internal:5001
   SKOPEO_IMAGE: quay.io/skopeo/stable@sha256:77e6c8901f6976bdfa87b8b14c40b96de754794c492d8ed295f77fba1454a4ab
@@ -55,23 +55,37 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
+          stage="${HANDOFF_ROOT}/${IMAGE_TAG}"
+          [[ "$(cat "${stage}/READY")" == "${IMAGE_TAG}" ]]
+          (
+            cd "${stage}"
+            sha256sum --check SHA256SUMS
+          )
+          auth_file="${DOCKER_CONFIG:-${HOME}/.docker}/config.json"
+          [[ -f "${auth_file}" ]]
           for image in backend-suite web gifbox clamav january-embed-shim; do
             destination="${DESTINATION_NAMESPACE}/${image}:${IMAGE_TAG}"
             architecture_refs=()
             for arch in amd64 arm64; do
-              source="${SOURCE_NAMESPACE}/${image}:${IMAGE_TAG}-${arch}"
+              source="${stage}/${image}-${arch}"
               architecture_ref="${destination}-${arch}"
-              actual="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")"
+              actual="$(docker run --rm \
+                --volume "${stage}:${stage}:ro" \
+                "${SKOPEO_IMAGE}" inspect \
+                --format '{{.Os}}/{{.Architecture}}' \
+                "oci:${source}:${IMAGE_TAG}-${arch}")"
               [[ "${actual}" == "linux/${arch}" ]]
-              docker tag "${source}" "${architecture_ref}"
-              docker push "${architecture_ref}"
+              docker run --rm \
+                --volume "${auth_file}:/auth.json:ro" \
+                --volume "${stage}:${stage}:ro" \
+                "${SKOPEO_IMAGE}" copy \
+                --dest-authfile /auth.json \
+                --retry-times 3 \
+                "oci:${source}:${IMAGE_TAG}-${arch}" \
+                "docker://${architecture_ref}"
               architecture_refs+=("${architecture_ref}")
             done
-            docker manifest rm "${destination}" >/dev/null 2>&1 || true
-            docker manifest create "${destination}" "${architecture_refs[@]}"
-            docker manifest annotate "${destination}" "${architecture_refs[0]}" --os linux --arch amd64
-            docker manifest annotate "${destination}" "${architecture_refs[1]}" --os linux --arch arm64
-            docker manifest push --purge "${destination}"
+            docker buildx imagetools create --tag "${destination}" "${architecture_refs[@]}"
           done
 
       - name: Migrate the prior rollback manifests when absent
@@ -148,8 +162,8 @@ jobs:
           for image in backend-suite web gifbox clamav january-embed-shim; do
             for arch in amd64 arm64; do
               docker image rm \
-                "${SOURCE_NAMESPACE}/${image}:${IMAGE_TAG}-${arch}" \
                 "${DESTINATION_NAMESPACE}/${image}:${IMAGE_TAG}-${arch}" \
                 >/dev/null 2>&1 || true
             done
           done
+          rm -rf "${HANDOFF_ROOT:?}/${IMAGE_TAG}"
