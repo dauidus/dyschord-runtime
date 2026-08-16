@@ -49,6 +49,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Publish staged architecture images and manifests
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          for image in backend-suite web gifbox clamav january-embed-shim; do
+            destination="${DESTINATION_NAMESPACE}/${image}:${IMAGE_TAG}"
+            architecture_refs=()
+            for arch in amd64 arm64; do
+              source="${SOURCE_NAMESPACE}/${image}:${IMAGE_TAG}-${arch}"
+              architecture_ref="${destination}-${arch}"
+              actual="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")"
+              [[ "${actual}" == "linux/${arch}" ]]
+              docker tag "${source}" "${architecture_ref}"
+              docker push "${architecture_ref}"
+              architecture_refs+=("${architecture_ref}")
+            done
+            docker manifest rm "${destination}" >/dev/null 2>&1 || true
+            docker manifest create "${destination}" "${architecture_refs[@]}"
+            docker manifest annotate "${destination}" "${architecture_refs[0]}" --os linux --arch amd64
+            docker manifest annotate "${destination}" "${architecture_refs[1]}" --os linux --arch arm64
+            docker manifest push --purge "${destination}"
+          done
+
       - name: Migrate the prior rollback manifests when absent
         shell: bash
         env:
@@ -89,31 +114,6 @@ jobs:
               architecture_refs+=("${architecture_ref}")
             done
             docker buildx imagetools create --tag "${destination}" "${architecture_refs[@]}"
-          done
-
-      - name: Publish staged architecture images and manifests
-        shell: bash
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
-        run: |
-          set -euo pipefail
-          for image in backend-suite web gifbox clamav january-embed-shim; do
-            destination="${DESTINATION_NAMESPACE}/${image}:${IMAGE_TAG}"
-            architecture_refs=()
-            for arch in amd64 arm64; do
-              source="${SOURCE_NAMESPACE}/${image}:${IMAGE_TAG}-${arch}"
-              architecture_ref="${destination}-${arch}"
-              actual="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")"
-              [[ "${actual}" == "linux/${arch}" ]]
-              docker tag "${source}" "${architecture_ref}"
-              docker push "${architecture_ref}"
-              architecture_refs+=("${architecture_ref}")
-            done
-            docker manifest rm "${destination}" >/dev/null 2>&1 || true
-            docker manifest create "${destination}" "${architecture_refs[@]}"
-            docker manifest annotate "${destination}" "${architecture_refs[0]}" --os linux --arch amd64
-            docker manifest annotate "${destination}" "${architecture_refs[1]}" --os linux --arch arm64
-            docker manifest push --purge "${destination}"
           done
 
       - name: Verify anonymous multi-architecture pulls
