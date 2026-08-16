@@ -62,10 +62,19 @@ jobs:
             fi
             source="${LEGACY_PREVIOUS_NAMESPACE}/${image}:${PREVIOUS_TAG}"
             raw="$(docker buildx imagetools inspect --raw "${source}")"
-            platforms="$(jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' <<<"${raw}")"
-            grep -qx 'linux/amd64' <<<"${platforms}"
-            grep -qx 'linux/arm64' <<<"${platforms}"
-            docker buildx imagetools create --tag "${destination}" "${source}"
+            architecture_refs=()
+            for arch in amd64 arm64; do
+              digest="$(jq -r --arg arch "${arch}" '
+                .manifests[]?
+                | select(.platform.os == "linux" and .platform.architecture == $arch)
+                | .digest
+              ' <<<"${raw}")"
+              [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]
+              architecture_ref="${destination}-${arch}"
+              docker buildx imagetools create --tag "${architecture_ref}" "${source%@*}@${digest}"
+              architecture_refs+=("${architecture_ref}")
+            done
+            docker buildx imagetools create --tag "${destination}" "${architecture_refs[@]}"
           done
 
       - name: Publish staged architecture images and manifests
