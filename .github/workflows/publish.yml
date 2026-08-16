@@ -1,0 +1,113 @@
+name: Publish Runtime Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Current immutable runtime release
+        required: true
+        default: 0.1.7
+      previous_tag:
+        description: Prior rollback release to preserve
+        required: true
+        default: 0.1.5
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-runtime-images
+  cancel-in-progress: false
+
+env:
+  SOURCE_NAMESPACE: registry.dyschord.com
+  DESTINATION_NAMESPACE: ghcr.io/dauidus/dyschord-runtime
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate immutable tags
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
+        run: |
+          set -euo pipefail
+          pattern='^[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9][a-zA-Z0-9.-]*)?$'
+          [[ "${IMAGE_TAG}" =~ ${pattern} ]]
+          [[ "${PREVIOUS_TAG}" =~ ${pattern} ]]
+          [[ "${IMAGE_TAG}" != "${PREVIOUS_TAG}" ]]
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create public-repository package ownership markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          context="$(mktemp -d)"
+          trap 'rm -rf "${context}"' EXIT
+          printf 'Dyschord public runtime distribution marker.\n' > "${context}/README"
+          cat > "${context}/Dockerfile" <<'EOF'
+          FROM scratch
+          LABEL org.opencontainers.image.source="https://github.com/dauidus/dyschord-runtime"
+          LABEL org.opencontainers.image.description="Dyschord public runtime distribution marker"
+          COPY README /README
+          EOF
+          for image in backend-suite web gifbox clamav january-embed-shim; do
+            docker buildx build \
+              --platform linux/amd64 \
+              --provenance=false \
+              --push \
+              --tag "${DESTINATION_NAMESPACE}/${image}:distribution-marker" \
+              "${context}"
+          done
+
+      - name: Copy current and rollback releases
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
+        run: |
+          set -euo pipefail
+          for image in backend-suite web gifbox clamav january-embed-shim; do
+            for tag in "${PREVIOUS_TAG}" "${IMAGE_TAG}"; do
+              source="${SOURCE_NAMESPACE}/${image}:${tag}"
+              destination="${DESTINATION_NAMESPACE}/${image}:${tag}"
+              raw="$(docker buildx imagetools inspect --raw "${source}")"
+              platforms="$(jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' <<<"${raw}")"
+              grep -qx 'linux/amd64' <<<"${platforms}"
+              grep -qx 'linux/arm64' <<<"${platforms}"
+              docker buildx imagetools create --tag "${destination}" "${source}"
+            done
+          done
+
+      - name: Verify anonymous multi-architecture pulls
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG
+          DOCKER_CONFIG="$(mktemp -d)"
+          trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
+          for image in backend-suite web gifbox clamav january-embed-shim; do
+            for tag in "${PREVIOUS_TAG}" "${IMAGE_TAG}"; do
+              ref="${DESTINATION_NAMESPACE}/${image}:${tag}"
+              raw="$(docker buildx imagetools inspect --raw "${ref}")"
+              platforms="$(jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' <<<"${raw}")"
+              grep -qx 'linux/amd64' <<<"${platforms}"
+              grep -qx 'linux/arm64' <<<"${platforms}"
+              printf 'verified %s\n' "${ref}"
+            done
+          done
