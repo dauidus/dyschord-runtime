@@ -61,7 +61,8 @@ jobs:
               printf 'already published %s\n' "${destination}"
               continue
             fi
-            source="${LEGACY_PREVIOUS_NAMESPACE}/${image}:${PREVIOUS_TAG}"
+            source_repository="${LEGACY_PREVIOUS_NAMESPACE}/${image}"
+            source="${source_repository}:${PREVIOUS_TAG}"
             raw="$(docker buildx imagetools inspect --raw "${source}")"
             architecture_refs=()
             auth_file="${DOCKER_CONFIG:-${HOME}/.docker}/config.json"
@@ -80,7 +81,7 @@ jobs:
                   "${SKOPEO_IMAGE}" copy \
                   --dest-authfile /auth.json \
                   --retry-times 3 \
-                  "docker://${source%@*}@${digest}" \
+                  "docker://${source_repository}@${digest}" \
                   "docker://${architecture_ref}"
               fi
               architecture_refs+=("${architecture_ref}")
