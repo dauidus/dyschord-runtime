@@ -50,6 +50,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install registry copy tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends skopeo
+
       - name: Create public-repository package ownership markers
         shell: bash
         run: |
@@ -87,7 +94,9 @@ jobs:
               platforms="$(jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' <<<"${raw}")"
               grep -qx 'linux/amd64' <<<"${platforms}"
               grep -qx 'linux/arm64' <<<"${platforms}"
-              docker buildx imagetools create --tag "${destination}" "${source}"
+              skopeo copy --all --retry-times 3 \
+                "docker://${source}" \
+                "docker://${destination}"
             done
           done
 
